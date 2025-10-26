@@ -1,0 +1,269 @@
+name: 'Setup TeX Live'
+description: 'Install and configure TeX Live with intelligent caching'
+inputs:
+  texlive-year:
+    description: 'TeX Live year to install'
+    required: false
+    default: '2025'
+  compilers:
+    description: 'Comma-separated list of compilers needed (pdflatex,xelatex,lualatex)'
+    required: false
+    default: 'pdflatex'
+  cache-version:
+    description: 'Cache version for invalidation'
+    required: false
+    default: 'v6'
+outputs:
+  bin-dir:
+    description: 'Path to TeX Live binary directory'
+    value: ${{ steps.setup.outputs.bin-dir }}
+  cache-hit:
+    description: 'Whether cache was hit'
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate cache keys
+      id: cache-keys
+      shell: bash
+      run: |
+        YEAR="${{ inputs.texlive-year }}"
+        COMPILERS="${{ inputs.compilers }}"
+        VERSION="${{ inputs.cache-version }}"
+        
+        # Sort compilers for consistent cache key
+        SORTED_COMPILERS=$(echo "$COMPILERS" | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//')
+        
+        echo "base-key=texlive-base-${YEAR}-${VERSION}-${{ runner.os }}" >> $GITHUB_OUTPUT
+        echo "compiler-key=texlive-compilers-${SORTED_COMPILERS}-${YEAR}-${VERSION}-${{ runner.os }}" >> $GITHUB_OUTPUT
+        echo "font-key=system-fonts-${VERSION}-${{ runner.os }}" >> $GITHUB_OUTPUT
+
+    - name: Cache TeX Live base installation
+      id: cache-base
+      uses: actions/cache@v4
+      with:
+        path: ~/texlive/${{ inputs.texlive-year }}/bin
+        key: ${{ steps.cache-keys.outputs.base-key }}
+        restore-keys: |
+          texlive-base-${{ inputs.texlive-year }}-${{ inputs.cache-version }}-${{ runner.os }}
+
+    - name: Cache compiler-specific packages
+      id: cache-compilers
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/texlive/${{ inputs.texlive-year }}/texmf-dist
+          ~/texlive/${{ inputs.texlive-year }}/texmf-var
+        key: ${{ steps.cache-keys.outputs.compiler-key }}
+        restore-keys: |
+          texlive-compilers-${{ inputs.compilers }}-${{ inputs.texlive-year }}-${{ inputs.cache-version }}-${{ runner.os }}
+
+    - name: Cache system fonts
+      id: cache-fonts
+      uses: actions/cache@v4
+      with:
+        path: ~/.fonts
+        key: ${{ steps.cache-keys.outputs.font-key }}
+        restore-keys: |
+          system-fonts-${{ inputs.cache-version }}-${{ runner.os }}
+
+    - name: Check installation status
+      id: check
+      shell: bash
+      run: |
+        YEAR="${{ inputs.texlive-year }}"
+        
+        if [ -d "$HOME/texlive/$YEAR" ]; then
+          BIN_DIR=$(find "$HOME/texlive/$YEAR/bin" -type d -name "*-linux" 2>/dev/null | head -1)
+          
+          if [ -n "$BIN_DIR" ] && [ -f "$BIN_DIR/pdflatex" ]; then
+            echo "texlive-installed=true" >> $GITHUB_OUTPUT
+            echo "bin-dir=$BIN_DIR" >> $GITHUB_OUTPUT
+          else
+            echo "texlive-installed=false" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "texlive-installed=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Install TeX Live base
+      if: steps.check.outputs.texlive-installed != 'true'
+      shell: bash
+      run: |
+        echo "Installing TeX Live ${{ inputs.texlive-year }}..."
+        
+        YEAR="${{ inputs.texlive-year }}"
+        TEMP_DIR=$(mktemp -d)
+        cd "$TEMP_DIR"
+        
+        wget -q "http://mirror.ctan.org/systems/texlive/tlnet/install-tl-unx.tar.gz"
+        tar -xzf install-tl-unx.tar.gz
+        
+        INSTALL_DIR=$(find . -name "install-tl-2*" -type d | head -1)
+        cd "$INSTALL_DIR"
+        
+        cat > texlive.profile << EOF
+        selected_scheme scheme-basic
+        TEXDIR ~/texlive/$YEAR
+        TEXMFCONFIG ~/texlive/$YEAR/texmf-config
+        TEXMFHOME ~/texlive/$YEAR/texmf
+        TEXMFLOCAL ~/texlive/$YEAR/texmf-local
+        TEXMFSYSCONFIG ~/texlive/$YEAR/texmf-config
+        TEXMFSYSVAR ~/texlive/$YEAR/texmf-var
+        TEXMFVAR ~/texlive/$YEAR/texmf-var
+        option_adjustrepo 1
+        option_autobackup 1
+        option_desktop_integration 0
+        option_doc 0
+        option_file_assocs 0
+        option_fmt 1
+        option_letter 0
+        option_menu_integration 0
+        option_path 0
+        option_post_code 1
+        option_src 0
+        option_sys_bin ~/texlive/$YEAR/bin
+        option_sys_info ~/texlive/$YEAR/share/info
+        option_sys_man ~/texlive/$YEAR/share/man
+        option_w32_multi_user 0
+        EOF
+        
+        ./install-tl -profile texlive.profile
+        
+        # Find bin directory and install basic packages
+        BIN_DIR=$(find ~/texlive/$YEAR/bin -type d -name "*-linux" | head -1)
+        if [ -z "$BIN_DIR" ]; then
+          echo "Error: Could not find TeX Live bin directory"
+          exit 1
+        fi
+        
+        export PATH="$BIN_DIR:$PATH"
+        tlmgr install latexmk amsmath amsfonts amscls graphics xcolor geometry fancyhdr hyperref url
+        
+        rm -rf "$TEMP_DIR"
+        echo "TeX Live base installation completed"
+
+    - name: Setup PATH and get bin directory
+      id: setup
+      shell: bash
+      run: |
+        YEAR="${{ inputs.texlive-year }}"
+        
+        if [ "${{ steps.check.outputs.texlive-installed }}" = "true" ]; then
+          BIN_DIR="${{ steps.check.outputs.bin-dir }}"
+        else
+          BIN_DIR=$(find ~/texlive/$YEAR/bin -type d -name "*-linux" 2>/dev/null | head -1)
+        fi
+        
+        if [ -z "$BIN_DIR" ]; then
+          echo "Error: Could not find TeX Live bin directory"
+          exit 1
+        fi
+        
+        echo "$BIN_DIR" >> $GITHUB_PATH
+        echo "bin-dir=$BIN_DIR" >> $GITHUB_OUTPUT
+        
+        # Verify installation
+        export PATH="$BIN_DIR:$PATH"
+        pdflatex --version | head -2
+
+    - name: Install Python for texliveonfly
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Install texliveonfly
+      shell: bash
+      run: |
+        BIN_DIR="${{ steps.setup.outputs.bin-dir }}"
+        export PATH="$BIN_DIR:$PATH"
+        
+        if [ "${{ steps.cache-compilers.outputs.cache-hit }}" != "true" ]; then
+          echo "Installing texliveonfly..."
+          tlmgr install texliveonfly
+          
+          # Create wrapper if needed
+          if [ ! -f "$BIN_DIR/texliveonfly" ]; then
+            SCRIPT_PATH=$(find ~/texlive/${{ inputs.texlive-year }}/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" 2>/dev/null | head -1)
+            
+            if [ -f "$SCRIPT_PATH" ]; then
+              cat > "$BIN_DIR/texliveonfly" << 'EOF'
+        #!/bin/bash
+        YEAR=${{ inputs.texlive-year }}
+        SCRIPT=$(find ~/texlive/$YEAR/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" | head -1)
+        python3 "$SCRIPT" "$@"
+        EOF
+              chmod +x "$BIN_DIR/texliveonfly"
+            fi
+          fi
+        fi
+
+    - name: Install compiler-specific packages
+      shell: bash
+      run: |
+        BIN_DIR="${{ steps.setup.outputs.bin-dir }}"
+        export PATH="$BIN_DIR:$PATH"
+        COMPILERS="${{ inputs.compilers }}"
+        
+        echo "Installing packages for compilers: $COMPILERS"
+        
+        if echo "$COMPILERS" | grep -q "xelatex"; then
+          echo "Setting up XeLaTeX..."
+          
+          if ! which xelatex >/dev/null 2>&1; then
+            tlmgr install collection-xetex
+          fi
+          
+          tlmgr install fontspec unicode-math polyglossia xunicode 2>/dev/null || true
+          
+          # Install system fonts if needed
+          if [ ! -f "$HOME/.fonts/.fonts_installed" ]; then
+            echo "Installing system fonts..."
+            mkdir -p "$HOME/.fonts"
+            
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq fonts-liberation fonts-noto fonts-noto-cjk fonts-noto-cjk-extra fonts-noto-color-emoji fonts-noto-extra
+            
+            cp -r /usr/share/fonts/truetype/liberation* "$HOME/.fonts/" 2>/dev/null || true
+            cp -r /usr/share/fonts/truetype/noto* "$HOME/.fonts/" 2>/dev/null || true
+            
+            touch "$HOME/.fonts/.fonts_installed"
+            fc-cache -f "$HOME/.fonts"
+          fi
+          
+          xelatex --version | head -2
+        fi
+        
+        if echo "$COMPILERS" | grep -q "lualatex"; then
+          echo "Setting up LuaLaTeX..."
+          
+          if ! which lualatex >/dev/null 2>&1; then
+            tlmgr install collection-luatex
+          fi
+          
+          tlmgr install luaotfload luatexbase luacode 2>/dev/null || true
+          lualatex --version | head -2
+        fi
+
+    - name: Final verification
+      shell: bash
+      run: |
+        BIN_DIR="${{ steps.setup.outputs.bin-dir }}"
+        export PATH="$BIN_DIR:$PATH"
+        
+        echo "=== TeX Live Installation Verification ==="
+        echo "Binary directory: $BIN_DIR"
+        echo "Available compilers:"
+        
+        which pdflatex && echo "[OK] pdflatex available"
+        which xelatex && echo "[OK] xelatex available" || echo "[--] xelatex not installed"
+        which lualatex && echo "[OK] lualatex available" || echo "[--] lualatex not installed"
+        which latexmk && echo "[OK] latexmk available"
+        which texliveonfly && echo "[OK] texliveonfly available"
+        
+        echo "Cache status:"
+        echo "  Base: ${{ steps.cache-base.outputs.cache-hit }}"
+        echo "  Compilers: ${{ steps.cache-compilers.outputs.cache-hit }}"
+        echo "  Fonts: ${{ steps.cache-fonts.outputs.cache-hit }}"
+        echo "========================================="

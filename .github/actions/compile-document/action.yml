@@ -1,0 +1,313 @@
+name: 'Compile LaTeX Document'
+description: 'Compile a single LaTeX document with automatic package installation'
+inputs:
+  file:
+    description: 'Path to the main .tex file to compile'
+    required: true
+  compiler:
+    description: 'LaTeX compiler to use (pdflatex, xelatex, lualatex)'
+    required: true
+  complexity:
+    description: 'Document complexity (simple, complex)'
+    required: false
+    default: 'simple'
+  needs-phase2:
+    description: 'Whether document needs multi-pass compilation'
+    required: false
+    default: 'false'
+  texlive-bin-dir:
+    description: 'Path to TeX Live bin directory'
+    required: true
+outputs:
+  pdf-path:
+    description: 'Path to generated PDF file'
+    value: ${{ steps.compile.outputs.pdf-path }}
+  pdf-size:
+    description: 'Size of generated PDF file'
+    value: ${{ steps.compile.outputs.pdf-size }}
+  compilation-time:
+    description: 'Time taken for compilation'
+    value: ${{ steps.compile.outputs.compilation-time }}
+  success:
+    description: 'Whether compilation was successful'
+    value: ${{ steps.compile.outputs.success }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup environment
+      shell: bash
+      run: |
+        export PATH="${{ inputs.texlive-bin-dir }}:$PATH"
+        echo "PATH=${{ inputs.texlive-bin-dir }}:$PATH" >> $GITHUB_ENV
+        
+        echo "=== Compilation Environment ==="
+        echo "File: ${{ inputs.file }}"
+        echo "Compiler: ${{ inputs.compiler }}"
+        echo "Complexity: ${{ inputs.complexity }}"
+        echo "Needs Phase 2: ${{ inputs.needs-phase2 }}"
+        echo "TeX Live bin: ${{ inputs.texlive-bin-dir }}"
+        echo "=============================="
+
+    - name: Validate inputs
+      shell: bash
+      run: |
+        FILE="${{ inputs.file }}"
+        
+        # Validate file exists
+        if [ ! -f "$FILE" ]; then
+          echo "Error: File '$FILE' does not exist"
+          exit 1
+        fi
+        
+        # Validate it's a main document
+        if ! grep -q '\\documentclass' "$FILE"; then
+          echo "Error: File '$FILE' is not a main LaTeX document (no \\documentclass found)"
+          exit 1
+        fi
+        
+        # Validate compiler
+        case "${{ inputs.compiler }}" in
+          pdflatex|xelatex|lualatex)
+            echo "Compiler validation: OK"
+            ;;
+          *)
+            echo "Error: Unsupported compiler '${{ inputs.compiler }}'"
+            exit 1
+            ;;
+        esac
+        
+        echo "Input validation: PASSED"
+
+    - name: Phase 1 - Initial compilation with package installation
+      id: phase1
+      shell: bash
+      run: |
+        START_TIME=$(date +%s)
+        FILE="${{ inputs.file }}"
+        COMPILER="${{ inputs.compiler }}"
+        FILE_DIR=$(dirname "$FILE")
+        BASENAME=$(basename "$FILE" .tex)
+        
+        echo "=== Phase 1: Package Installation & Initial Compilation ==="
+        echo "Working directory: $FILE_DIR"
+        echo "Document: $BASENAME.tex"
+        echo "Compiler: $COMPILER"
+        echo ""
+        
+        cd "$FILE_DIR"
+        
+        # Run texliveonfly for automatic package installation
+        echo "Running texliveonfly..."
+        texliveonfly \
+          --compiler="$COMPILER" \
+          --arguments="-interaction=nonstopmode -file-line-error" \
+          "$(basename "$FILE")" 2>&1 | tee compilation_phase1.log || PHASE1_FAILED=true
+        
+        if [ ! -f "${BASENAME}.pdf" ] || [ "$PHASE1_FAILED" = "true" ]; then
+          echo "Phase 1 compilation failed"
+          echo "Last 30 lines of log:"
+          tail -30 compilation_phase1.log 2>/dev/null || echo "No log available"
+          
+          if [ -f "${BASENAME}.log" ]; then
+            echo ""
+            echo "LaTeX log errors:"
+            grep -A3 -B3 "^!" "${BASENAME}.log" | head -20 || echo "No errors found in LaTeX log"
+          fi
+          
+          echo "phase1-success=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+        PHASE1_TIME=$(($(date +%s) - START_TIME))
+        PDF_SIZE=$(du -h "${BASENAME}.pdf" | cut -f1)
+        
+        echo "Phase 1 completed successfully"
+        echo "PDF generated: ${BASENAME}.pdf ($PDF_SIZE)"
+        echo "Time taken: ${PHASE1_TIME}s"
+        echo ""
+        
+        echo "phase1-success=true" >> $GITHUB_OUTPUT
+        echo "phase1-time=${PHASE1_TIME}" >> $GITHUB_OUTPUT
+        echo "initial-pdf-size=$PDF_SIZE" >> $GITHUB_OUTPUT
+
+    - name: Phase 2 - Multi-pass compilation with latexmk
+      id: phase2
+      if: inputs.needs-phase2 == 'true' && steps.phase1.outputs.phase1-success == 'true'
+      shell: bash
+      run: |
+        START_TIME=$(date +%s)
+        FILE="${{ inputs.file }}"
+        COMPILER="${{ inputs.compiler }}"
+        FILE_DIR=$(dirname "$FILE")
+        BASENAME=$(basename "$FILE" .tex)
+        
+        echo "=== Phase 2: Multi-pass Compilation with latexmk ==="
+        echo "Document requires multiple passes for:"
+        
+        if grep -qE '\\bibliography\{|\\addbibresource\{|\\printbibliography|\\cite\{' "$FILE"; then
+          echo "  - Bibliography processing"
+        fi
+        if grep -qE '\\ref\{|\\pageref\{|\\eqref\{|\\label\{' "$FILE"; then
+          echo "  - Cross-references"
+        fi
+        if grep -qE '\\tableofcontents|\\listoffigures|\\listoftables' "$FILE"; then
+          echo "  - Table of contents/figures/tables"
+        fi
+        echo ""
+        
+        cd "$FILE_DIR"
+        
+        # Choose latexmk arguments based on compiler
+        case "$COMPILER" in
+          xelatex)
+            LATEXMK_ARGS="-xelatex"
+            ;;
+          lualatex)
+            LATEXMK_ARGS="-lualatex"
+            ;;
+          *)
+            LATEXMK_ARGS="-pdf"
+            ;;
+        esac
+        
+        echo "Running latexmk with $LATEXMK_ARGS..."
+        latexmk $LATEXMK_ARGS \
+          -f \
+          -interaction=nonstopmode \
+          -file-line-error \
+          "$(basename "$FILE")" 2>&1 | tee compilation_phase2.log || PHASE2_FAILED=true
+        
+        if [ ! -f "${BASENAME}.pdf" ] || [ "$PHASE2_FAILED" = "true" ]; then
+          echo "Phase 2 compilation failed"
+          echo "Last 30 lines of log:"
+          tail -30 compilation_phase2.log 2>/dev/null || echo "No log available"
+          
+          echo "phase2-success=false" >> $GITHUB_OUTPUT
+          # Don't exit - Phase 1 PDF might still be usable
+        else
+          PHASE2_TIME=$(($(date +%s) - START_TIME))
+          PDF_SIZE=$(du -h "${BASENAME}.pdf" | cut -f1)
+          
+          echo "Phase 2 completed successfully"
+          echo "Final PDF: ${BASENAME}.pdf ($PDF_SIZE)"
+          echo "Time taken: ${PHASE2_TIME}s"
+          
+          echo "phase2-success=true" >> $GITHUB_OUTPUT
+          echo "phase2-time=${PHASE2_TIME}" >> $GITHUB_OUTPUT
+          echo "final-pdf-size=$PDF_SIZE" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Analyze compilation results
+      id: compile
+      shell: bash
+      run: |
+        FILE="${{ inputs.file }}"
+        FILE_DIR=$(dirname "$FILE")
+        BASENAME=$(basename "$FILE" .tex)
+        
+        cd "$FILE_DIR"
+        
+        if [ ! -f "${BASENAME}.pdf" ]; then
+          echo "Compilation failed: No PDF generated"
+          echo "success=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+        PDF_PATH="${FILE_DIR}/${BASENAME}.pdf"
+        PDF_SIZE=$(du -h "${BASENAME}.pdf" | cut -f1)
+        
+        # Calculate total compilation time
+        PHASE1_TIME="${{ steps.phase1.outputs.phase1-time }}"
+        PHASE2_TIME="${{ steps.phase2.outputs.phase2-time }}"
+        
+        if [ -n "$PHASE2_TIME" ]; then
+          TOTAL_TIME=$((PHASE1_TIME + PHASE2_TIME))
+        else
+          TOTAL_TIME=$PHASE1_TIME
+        fi
+        
+        echo "success=true" >> $GITHUB_OUTPUT
+        echo "pdf-path=$PDF_PATH" >> $GITHUB_OUTPUT
+        echo "pdf-size=$PDF_SIZE" >> $GITHUB_OUTPUT
+        echo "compilation-time=${TOTAL_TIME}s" >> $GITHUB_OUTPUT
+        
+        echo "=== Compilation Summary ==="
+        echo "Status: SUCCESS"
+        echo "PDF: $PDF_PATH ($PDF_SIZE)"
+        echo "Total time: ${TOTAL_TIME}s"
+        echo "Phase 1: ${PHASE1_TIME}s"
+        if [ -n "$PHASE2_TIME" ]; then
+          echo "Phase 2: ${PHASE2_TIME}s"
+        else
+          echo "Phase 2: SKIPPED (not needed)"
+        fi
+        echo "==========================="
+
+    - name: Check for warnings and errors
+      shell: bash
+      run: |
+        FILE="${{ inputs.file }}"
+        FILE_DIR=$(dirname "$FILE")
+        BASENAME=$(basename "$FILE" .tex)
+        
+        cd "$FILE_DIR"
+        
+        if [ -f "${BASENAME}.log" ]; then
+          echo ""
+          echo "=== LaTeX Log Analysis ==="
+          
+          # Check for warnings
+          WARNING_COUNT=$(grep -c -i "warning" "${BASENAME}.log" || echo "0")
+          if [ "$WARNING_COUNT" -gt 0 ]; then
+            echo "Warnings found: $WARNING_COUNT"
+            echo "Sample warnings (first 5):"
+            grep -i "warning" "${BASENAME}.log" | head -5 | sed 's/^/  /'
+          else
+            echo "No warnings found"
+          fi
+          
+          # Check for errors (but PDF was still generated)
+          ERROR_COUNT=$(grep -c "^!" "${BASENAME}.log" || echo "0")
+          if [ "$ERROR_COUNT" -gt 0 ]; then
+            echo "LaTeX errors found: $ERROR_COUNT (PDF generated despite errors)"
+            echo "Sample errors (first 3):"
+            grep -A1 "^!" "${BASENAME}.log" | head -6 | sed 's/^/  /'
+          else
+            echo "No LaTeX errors found"
+          fi
+          
+          # Check for over/underfull boxes
+          OVERFULL_COUNT=$(grep -c "Overfull" "${BASENAME}.log" || echo "0")
+          UNDERFULL_COUNT=$(grep -c "Underfull" "${BASENAME}.log" || echo "0")
+          
+          if [ "$OVERFULL_COUNT" -gt 0 ] || [ "$UNDERFULL_COUNT" -gt 0 ]; then
+            echo "Box issues: $OVERFULL_COUNT overfull, $UNDERFULL_COUNT underfull"
+          else
+            echo "No box issues found"
+          fi
+          
+          echo "=========================="
+        fi
+
+    - name: Cleanup temporary files
+      if: always()
+      shell: bash
+      run: |
+        FILE="${{ inputs.file }}"
+        FILE_DIR=$(dirname "$FILE")
+        BASENAME=$(basename "$FILE" .tex)
+        
+        cd "$FILE_DIR"
+        
+        echo "Cleaning up temporary files..."
+        
+        # Keep PDF and log, remove other auxiliary files
+        rm -f "${BASENAME}.aux" "${BASENAME}.bbl" "${BASENAME}.blg" \
+              "${BASENAME}.fls" "${BASENAME}.fdb_latexmk" "${BASENAME}.synctex.gz" \
+              "${BASENAME}.out" "${BASENAME}.toc" "${BASENAME}.lof" "${BASENAME}.lot" \
+              "${BASENAME}.nav" "${BASENAME}.snm" "${BASENAME}.vrb" \
+              compilation_phase1.log compilation_phase2.log \
+              *.compiler *.complexity *.phase2
+        
+        echo "Cleanup completed"

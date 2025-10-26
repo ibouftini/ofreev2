@@ -1,0 +1,413 @@
+name: 'Detect LaTeX Changes'
+description: 'Detect changed LaTeX documents and generate compilation matrix'
+inputs:
+  base-ref:
+    description: 'Base reference for comparison (e.g., HEAD^)'
+    required: false
+    default: 'HEAD^'
+  force-all:
+    description: 'Force compilation of all documents'
+    required: false
+    default: 'false'
+outputs:
+  has-changes:
+    description: 'Whether any LaTeX files need compilation'
+    value: ${{ steps.analyze.outputs.has-changes }}
+  matrix:
+    description: 'JSON matrix for parallel compilation'
+    value: ${{ steps.generate-matrix.outputs.matrix }}
+  summary:
+    description: 'Human-readable summary of changes'
+    value: ${{ steps.analyze.outputs.summary }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate LaTeX files
+      shell: bash
+      run: |
+        echo "Validating LaTeX files in repository..."
+        
+        shopt -s globstar nullglob
+        TEX_FILES=(**/*.tex)
+        
+        if [ ${#TEX_FILES[@]} -eq 0 ]; then
+          echo "Error: No .tex files found in repository"
+          exit 1
+        fi
+        
+        MAIN_COUNT=0
+        for file in "${TEX_FILES[@]}"; do
+          if grep -q '\\documentclass' "$file"; then
+            MAIN_COUNT=$((MAIN_COUNT + 1))
+            echo "Found main document: $file"
+          fi
+        done
+        
+        if [ $MAIN_COUNT -eq 0 ]; then
+          echo "Error: No main LaTeX documents found (no \\documentclass)"
+          exit 1
+        fi
+        
+        echo "Validation successful: $MAIN_COUNT main document(s) found"
+
+    - name: Analyze changes
+      id: analyze
+      shell: bash
+      run: |
+        echo "Analyzing document changes..."
+        echo "========================================="
+        
+        FORCE_ALL="${{ inputs.force-all }}"
+        BASE_REF="${{ inputs.base-ref }}"
+        FILES_TO_COMPILE=""
+        SUMMARY=""
+        
+        if [ "$FORCE_ALL" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "Manual trigger or force-all detected: will compile all documents"
+          SUMMARY="Manual compilation requested"
+          
+          shopt -s globstar nullglob
+          for file in **/*.tex; do
+            if grep -q '\\documentclass' "$file"; then
+              FILES_TO_COMPILE="$FILES_TO_COMPILE $file"
+            fi
+          done
+        else
+          # Get changed files with their status
+          CHANGED_FILES=$(git diff --name-status "$BASE_REF" HEAD 2>/dev/null | grep -E '\.(tex|bib|cls|sty)$' || true)
+          
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No LaTeX-related files changed"
+            SUMMARY="No changes detected"
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+            echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "Git detected changes:"
+          echo "$CHANGED_FILES"
+          echo ""
+          
+          # Parse changed files by status
+          ADDED_FILES=$(echo "$CHANGED_FILES" | awk '$1 == "A" {print $2}' || true)
+          MODIFIED_FILES=$(echo "$CHANGED_FILES" | awk '$1 == "M" {print $2}' || true)
+          DELETED_FILES=$(echo "$CHANGED_FILES" | awk '$1 == "D" {print $2}' || true)
+          RENAMED_FILES=$(echo "$CHANGED_FILES" | awk '$1 ~ /^R/ {print $3}' || true)
+          
+          # Combine existing files (not deleted)
+          EXISTING_CHANGED=$(echo -e "$ADDED_FILES\n$MODIFIED_FILES\n$RENAMED_FILES" | grep -v '^$' || true)
+          
+          echo "Files to consider (excluding deleted):"
+          echo "$EXISTING_CHANGED"
+          echo ""
+          
+          # Analyze each main document for dependencies
+          shopt -s globstar nullglob
+          AFFECTED_DOCS=""
+          
+          for file in **/*.tex; do
+            # Skip if not a main document
+            if ! grep -q '\\documentclass' "$file"; then
+              continue
+            fi
+            
+            FILE_DIR=$(dirname "$file")
+            NEEDS_COMPILE=false
+            REASON=""
+            
+            # Check 1: Was this main file itself changed?
+            if echo "$EXISTING_CHANGED" | grep -q "^${file}$"; then
+              NEEDS_COMPILE=true
+              REASON="main file changed"
+            fi
+            
+            # Check 2: Were any included files changed?
+            if [ "$NEEDS_COMPILE" = "false" ]; then
+              INCLUDES=$(grep -E '\\input\{|\\include\{' "$file" 2>/dev/null | sed -E 's/.*\\(input|include)\{([^}]+)\}.*/\2/' || true)
+              
+              for inc in $INCLUDES; do
+                [[ "$inc" != *.tex ]] && inc="${inc}.tex"
+                
+                if [[ "$inc" = /* ]] || [[ "$inc" = ~* ]]; then
+                  INC_PATH="$inc"
+                else
+                  INC_PATH="${FILE_DIR}/${inc}"
+                fi
+                
+                INC_PATH=$(echo "$INC_PATH" | sed 's|/\./|/|g; s|//|/|g')
+                
+                if echo "$EXISTING_CHANGED" | grep -qF "$INC_PATH" || echo "$EXISTING_CHANGED" | grep -qF "$inc"; then
+                  NEEDS_COMPILE=true
+                  REASON="included file $inc changed"
+                  break
+                fi
+              done
+            fi
+            
+            # Check 3: Were bibliography files changed?
+            if [ "$NEEDS_COMPILE" = "false" ]; then
+              if grep -qE '\\cite|\\bibliography|\\addbibresource' "$file"; then
+                BIB_FILES=$(grep -E '\\bibliography\{|\\addbibresource\{' "$file" 2>/dev/null | \
+                           sed -E 's/.*\\(bibliography|addbibresource)(\[[^]]*\])?\{([^}]+)\}.*/\3/' | \
+                           tr ',' '\n' || true)
+                
+                if [ -n "$BIB_FILES" ]; then
+                  for bib in $BIB_FILES; do
+                    [[ "$bib" != *.bib ]] && bib="${bib}.bib"
+                    
+                    if [[ "$bib" = /* ]] || [[ "$bib" = ~* ]]; then
+                      BIB_PATH="$bib"
+                    else
+                      BIB_PATH="${FILE_DIR}/${bib}"
+                    fi
+                    
+                    BIB_PATH=$(echo "$BIB_PATH" | sed 's|/\./|/|g; s|//|/|g')
+                    
+                    if echo "$EXISTING_CHANGED" | grep -qF "$BIB_PATH" || echo "$EXISTING_CHANGED" | grep -qF "$bib"; then
+                      NEEDS_COMPILE=true
+                      REASON="bibliography file $bib changed"
+                      break
+                    fi
+                  done
+                else
+                  if echo "$EXISTING_CHANGED" | grep -q "^${FILE_DIR}/.*\.bib$"; then
+                    NEEDS_COMPILE=true
+                    REASON="bibliography file in document directory changed"
+                  fi
+                fi
+              fi
+            fi
+            
+            # Check 4: Were class or style files changed?
+            if [ "$NEEDS_COMPILE" = "false" ]; then
+              DOC_CLASS=$(grep -E '\\documentclass' "$file" | sed -E 's/.*\\documentclass(\[[^]]*\])?\{([^}]+)\}.*/\2/' | head -1)
+              PACKAGES=$(grep -E '\\usepackage' "$file" | sed -E 's/.*\\usepackage(\[[^]]*\])?\{([^}]+)\}.*/\2/' | tr ',' '\n' || true)
+              
+              for changed in $(echo "$EXISTING_CHANGED" | grep -E '\.(cls|sty)$' || true); do
+                CHANGED_BASE=$(basename "$changed" | sed 's/\.(cls|sty)$//')
+                
+                if [ "$DOC_CLASS" = "$CHANGED_BASE" ] || echo "$PACKAGES" | grep -q "^${CHANGED_BASE}$" || [[ "$changed" == "$FILE_DIR"* ]]; then
+                  NEEDS_COMPILE=true
+                  REASON="class/style file $changed changed"
+                  break
+                fi
+              done
+            fi
+            
+            if [ "$NEEDS_COMPILE" = "true" ]; then
+              echo "$file: needs compilation ($REASON)"
+              FILES_TO_COMPILE="$FILES_TO_COMPILE $file"
+              AFFECTED_DOCS="$AFFECTED_DOCS $file"
+            else
+              echo "$file: no changes detected, skipping"
+            fi
+          done
+          
+          if [ -n "$AFFECTED_DOCS" ]; then
+            DOC_COUNT=$(echo "$AFFECTED_DOCS" | wc -w)
+            SUMMARY="$DOC_COUNT document(s) affected by changes"
+          else
+            SUMMARY="No documents need compilation"
+          fi
+        fi
+        
+        echo "========================================="
+        
+        if [ -z "$FILES_TO_COMPILE" ]; then
+          echo "No files need compilation"
+          echo "has-changes=false" >> $GITHUB_OUTPUT
+        else
+          echo ""
+          echo "Files to compile:"
+          for file in $FILES_TO_COMPILE; do
+            echo "  - $file"
+          done
+          echo "FILES_TO_COMPILE<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES_TO_COMPILE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "has-changes=true" >> $GITHUB_OUTPUT
+        fi
+        
+        echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
+
+    - name: Detect compiler requirements
+      id: detect-compiler
+      if: steps.analyze.outputs.has-changes == 'true'
+      shell: bash
+      run: |
+        echo "Detecting compiler requirements..."
+        echo "================================="
+        
+        FILES_TO_COMPILE="${{ steps.analyze.outputs.FILES_TO_COMPILE }}"
+        
+        for file in $FILES_TO_COMPILE; do
+          FILE_DIR=$(dirname "$file")
+          BASENAME=$(basename "$file" .tex)
+          COMPILER="pdflatex"
+          DETECTION_METHOD="default"
+          
+          echo ""
+          echo "Analyzing: $file"
+          echo "---------------------------------"
+          
+          # Check for explicit directive
+          EXPLICIT_DIRECTIVE=$(grep -E '^[[:space:]]*%[[:space:]]*!TeX[[:space:]]+program[[:space:]]*=' "$file" 2>/dev/null | head -1 || true)
+          
+          if [ -n "$EXPLICIT_DIRECTIVE" ]; then
+            if echo "$EXPLICIT_DIRECTIVE" | grep -qi "xelatex"; then
+              COMPILER="xelatex"
+              DETECTION_METHOD="explicit directive"
+            elif echo "$EXPLICIT_DIRECTIVE" | grep -qi "lualatex"; then
+              COMPILER="lualatex"
+              DETECTION_METHOD="explicit directive"
+            elif echo "$EXPLICIT_DIRECTIVE" | grep -qi "pdflatex"; then
+              COMPILER="pdflatex"
+              DETECTION_METHOD="explicit directive"
+            fi
+          else
+            # Package-based detection
+            if grep -qE '\\usepackage(\[[^]]*\])?\{fontspec\}' "$file"; then
+              COMPILER="xelatex"
+              DETECTION_METHOD="auto-detected (fontspec package)"
+            elif grep -qE '\\usepackage(\[[^]]*\])?\{polyglossia\}' "$file"; then
+              COMPILER="xelatex"
+              DETECTION_METHOD="auto-detected (polyglossia package)"
+            elif grep -qE '\\setmainfont\{|\\setsansfont\{|\\setmonofont\{' "$file"; then
+              COMPILER="xelatex"
+              DETECTION_METHOD="auto-detected (font commands)"
+            elif grep -qE '\\usepackage(\[[^]]*\])?\{luacode\}' "$file"; then
+              COMPILER="lualatex"
+              DETECTION_METHOD="auto-detected (luacode package)"
+            elif grep -qE '\\directlua\{' "$file"; then
+              COMPILER="lualatex"
+              DETECTION_METHOD="auto-detected (directlua command)"
+            elif grep -qE '\\usepackage(\[[^]]*\])?\{luatextra\}' "$file"; then
+              COMPILER="lualatex"
+              DETECTION_METHOD="auto-detected (luatextra package)"
+            fi
+          fi
+          
+          echo "Compiler: $COMPILER ($DETECTION_METHOD)"
+          echo "$COMPILER" > "${FILE_DIR}/${BASENAME}.compiler"
+        done
+
+    - name: Analyze compilation complexity
+      id: analyze-complexity
+      if: steps.analyze.outputs.has-changes == 'true'
+      shell: bash
+      run: |
+        echo "Analyzing compilation complexity..."
+        echo "=================================="
+        
+        FILES_TO_COMPILE="${{ steps.analyze.outputs.FILES_TO_COMPILE }}"
+        
+        for file in $FILES_TO_COMPILE; do
+          FILE_DIR=$(dirname "$file")
+          BASENAME=$(basename "$file" .tex)
+          COMPLEXITY="simple"
+          NEEDS_PHASE2=false
+          REASONS=""
+          
+          echo ""
+          echo "Analyzing: $file"
+          echo "---------------------------------"
+          
+          # Check for bibliography/citations
+          if grep -qE '\\bibliography\{|\\addbibresource\{|\\printbibliography|\\cite\{|\\citep\{|\\citet\{' "$file"; then
+            NEEDS_PHASE2=true
+            COMPLEXITY="complex"
+            REASONS="$REASONS bibliography"
+          fi
+          
+          # Check for cross-references
+          if grep -qE '\\ref\{|\\pageref\{|\\eqref\{|\\label\{' "$file"; then
+            NEEDS_PHASE2=true
+            COMPLEXITY="complex"
+            REASONS="$REASONS cross-references"
+          fi
+          
+          # Check for TOC/LOF/LOT
+          if grep -qE '\\tableofcontents|\\listoffigures|\\listoftables' "$file"; then
+            NEEDS_PHASE2=true
+            COMPLEXITY="complex"
+            REASONS="$REASONS toc"
+          fi
+          
+          # Check for bibliography files in directory
+          shopt -s globstar nullglob
+          if ls "${FILE_DIR}"/*.bib >/dev/null 2>&1; then
+            NEEDS_PHASE2=true
+            COMPLEXITY="complex"
+            REASONS="$REASONS bib-files"
+          fi
+          
+          echo "Complexity: $COMPLEXITY"
+          echo "Phase 2 needed: $NEEDS_PHASE2"
+          if [ -n "$REASONS" ]; then
+            echo "Reasons: $REASONS"
+          fi
+          
+          echo "$COMPLEXITY" > "${FILE_DIR}/${BASENAME}.complexity"
+          echo "$NEEDS_PHASE2" > "${FILE_DIR}/${BASENAME}.phase2"
+        done
+
+    - name: Generate compilation matrix
+      id: generate-matrix
+      if: steps.analyze.outputs.has-changes == 'true'
+      shell: bash
+      run: |
+        echo "Generating compilation matrix..."
+        echo "==============================="
+        
+        FILES_TO_COMPILE="${{ steps.analyze.outputs.FILES_TO_COMPILE }}"
+        MATRIX_JSON=""
+        
+        for file in $FILES_TO_COMPILE; do
+          FILE_DIR=$(dirname "$file")
+          BASENAME=$(basename "$file" .tex)
+          
+          # Read detected properties
+          COMPILER="pdflatex"
+          COMPLEXITY="simple"
+          NEEDS_PHASE2="false"
+          
+          [ -f "${FILE_DIR}/${BASENAME}.compiler" ] && COMPILER=$(cat "${FILE_DIR}/${BASENAME}.compiler")
+          [ -f "${FILE_DIR}/${BASENAME}.complexity" ] && COMPLEXITY=$(cat "${FILE_DIR}/${BASENAME}.complexity")
+          [ -f "${FILE_DIR}/${BASENAME}.phase2" ] && NEEDS_PHASE2=$(cat "${FILE_DIR}/${BASENAME}.phase2")
+          
+          # Create matrix entry
+          ENTRY="{\"file\":\"$file\",\"compiler\":\"$COMPILER\",\"complexity\":\"$COMPLEXITY\",\"needs-phase2\":$NEEDS_PHASE2,\"directory\":\"$FILE_DIR\",\"basename\":\"$BASENAME\"}"
+          
+          if [ -z "$MATRIX_JSON" ]; then
+            MATRIX_JSON="$ENTRY"
+          else
+            MATRIX_JSON="$MATRIX_JSON,$ENTRY"
+          fi
+          
+          echo "Matrix entry: $file -> $COMPILER ($COMPLEXITY)"
+        done
+        
+        MATRIX_JSON="[$MATRIX_JSON]"
+        
+        echo "Generated matrix:"
+        echo "$MATRIX_JSON" | jq '.'
+        
+        echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+
+    - name: Summary
+      if: always()
+      shell: bash
+      run: |
+        echo "====================================="
+        echo "Change Detection Summary"
+        echo "====================================="
+        echo "Has changes: ${{ steps.analyze.outputs.has-changes }}"
+        echo "Summary: ${{ steps.analyze.outputs.summary }}"
+        
+        if [ "${{ steps.analyze.outputs.has-changes }}" = "true" ]; then
+          echo ""
+          echo "Matrix entries:"
+          echo '${{ steps.generate-matrix.outputs.matrix }}' | jq -r '.[] | "  - \(.file) (\(.compiler), \(.complexity))"'
+        fi
+        echo "====================================="

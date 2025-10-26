@@ -1,0 +1,248 @@
+# LaTeX Compilation Configuration
+# This file centralizes all configuration for the LaTeX workflow
+
+# TeX Live Configuration
+texlive:
+  year: 2025
+  cache_version: v6
+  schemes:
+    basic:
+      - latexmk
+      - amsmath
+      - amsfonts
+      - amscls
+      - graphics
+      - xcolor
+      - geometry
+      - fancyhdr
+      - hyperref
+      - url
+    xelatex:
+      - fontspec
+      - unicode-math
+      - polyglossia
+      - xunicode
+    lualatex:
+      - luaotfload
+      - luatexbase
+      - luacode
+
+# Compiler Configuration
+compilers:
+  pdflatex:
+    resources:
+      cpu: 2
+      memory: 4GB
+    packages: []
+    auto_detect_packages:
+      - none
+  
+  xelatex:
+    resources:
+      cpu: 2
+      memory: 6GB
+    packages:
+      - fontspec
+      - unicode-math
+      - polyglossia
+      - xunicode
+    auto_detect_packages:
+      - fontspec
+      - polyglossia
+      - setmainfont
+      - setsansfont
+      - setmonofont
+    system_fonts:
+      - fonts-liberation
+      - fonts-noto
+      - fonts-noto-cjk
+      - fonts-noto-cjk-extra
+      - fonts-noto-color-emoji
+      - fonts-noto-extra
+  
+  lualatex:
+    resources:
+      cpu: 2
+      memory: 6GB
+    packages:
+      - luaotfload
+      - luatexbase
+      - luacode
+    auto_detect_packages:
+      - luacode
+      - directlua
+      - luatextra
+
+# Compilation Strategy
+compilation:
+  # Maximum parallel jobs
+  max_parallel: 4
+  
+  # Complexity detection patterns
+  complexity_patterns:
+    simple:
+      - basic document with minimal packages
+    complex:
+      bibliography:
+        - '\bibliography{'
+        - '\addbibresource{'
+        - '\printbibliography'
+        - '\cite{'
+        - '\citep{'
+        - '\citet{'
+      cross_references:
+        - '\ref{'
+        - '\pageref{'
+        - '\eqref{'
+        - '\label{'
+      toc:
+        - '\tableofcontents'
+        - '\listoffigures'
+        - '\listoftables'
+  
+  # Phase 2 triggers (multi-pass compilation)
+  phase2_triggers:
+    - bibliography
+    - cross_references
+    - toc
+    - bib_files_present
+
+# File Patterns
+file_patterns:
+  # Files that trigger compilation
+  trigger_files:
+    - '**.tex'
+    - '**.bib'
+    - '**.cls'
+    - '**.sty'
+    - '.github/workflows/**'
+    - '.github/actions/**'
+  
+  # Main document detection
+  main_document_pattern: '\documentclass'
+  
+  # Dependency patterns
+  dependencies:
+    includes:
+      - '\input{'
+      - '\include{'
+    bibliography:
+      - '\bibliography{'
+      - '\addbibresource{'
+    packages:
+      - '\usepackage{'
+    documentclass:
+      - '\documentclass{'
+
+# Caching Strategy
+caching:
+  # Cache paths and keys
+  texlive_base:
+    path: ~/texlive/2025/bin
+    key_pattern: texlive-base-{year}-{version}-{os}
+  
+  texlive_packages:
+    path: 
+      - ~/texlive/2025/texmf-dist
+      - ~/texlive/2025/texmf-var
+    key_pattern: texlive-compilers-{compilers}-{year}-{version}-{os}
+  
+  system_fonts:
+    path: ~/.fonts
+    key_pattern: system-fonts-{version}-{os}
+  
+  # Cache retention
+  retention_days: 30
+
+# Error Handling
+error_handling:
+  # Retry configuration
+  git_push_retries: 3
+  git_push_delay: 2  # seconds, multiplied by retry count
+  
+  # Failure behavior
+  fail_fast: false  # Continue other compilations if one fails
+  
+  # Log retention
+  log_retention_days: 7
+
+# Performance Optimization
+performance:
+  # Resource allocation based on complexity
+  resources:
+    simple:
+      runner: ubuntu-latest
+      parallel_jobs: 4
+    complex:
+      runner: ubuntu-latest
+      parallel_jobs: 2
+  
+  # Timeout settings (minutes)
+  timeouts:
+    setup: 10
+    compilation_simple: 5
+    compilation_complex: 15
+    total_workflow: 60
+
+# Artifact Management
+artifacts:
+  pdfs:
+    retention_days: 30
+    upload_pattern: '*.pdf'
+  
+  logs:
+    retention_days: 7
+    upload_pattern:
+      - '*.log'
+      - '*.aux'
+      - '*.blg'
+  
+  # Temporary files to clean
+  cleanup_patterns:
+    - '*.aux'
+    - '*.bbl'
+    - '*.blg'
+    - '*.fls'
+    - '*.fdb_latexmk'
+    - '*.synctex.gz'
+    - '*.out'
+    - '*.toc'
+    - '*.lof'
+    - '*.lot'
+    - '*.nav'
+    - '*.snm'
+    - '*.vrb'
+    - '*.compiler'
+    - '*.complexity'
+    - '*.phase2'
+    - 'compilation_*.log'
+
+# Git Configuration
+git:
+  user:
+    name: "LaTeX Compiler Bot"
+    email: "action@github.com"
+  
+  commit:
+    message_pattern: "Auto-compile LaTeX: {success_count} document(s){failed_suffix} - {timestamp}"
+    failed_suffix_pattern: " ({failed_count} failed)"
+    timestamp_format: "%Y-%m-%d %H:%M:%S UTC"
+
+# Monitoring and Reporting
+monitoring:
+  # Step summary sections
+  summary_sections:
+    - change_detection
+    - texlive_setup
+    - compilation_results
+    - performance_metrics
+    - final_summary
+  
+  # Metrics to track
+  metrics:
+    - compilation_time
+    - pdf_size
+    - cache_hit_rate
+    - parallel_efficiency
+    - error_count
+    - warning_count

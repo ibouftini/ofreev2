@@ -1,0 +1,321 @@
+name: 'LaTeX Compiler (Optimized)'
+
+on:
+  push:
+    paths: ['**.tex', '**.bib', '**.cls', '**.sty', '.github/workflows/**', '.github/actions/**']
+  workflow_dispatch:
+    inputs:
+      force-all:
+        description: 'Force compilation of all documents'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TEXLIVE_YEAR: '2025'
+  CACHE_VERSION: 'v6'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  detect:
+    name: 'Detect Changes'
+    runs-on: ubuntu-latest
+    outputs:
+      has-changes: ${{ steps.detect.outputs.has-changes }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+      summary: ${{ steps.detect.outputs.summary }}
+      required-compilers: ${{ steps.compilers.outputs.required-compilers }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changes and generate matrix
+        id: detect
+        uses: ./.github/actions/detect-changes
+        with:
+          base-ref: 'HEAD^'
+          force-all: ${{ github.event.inputs.force-all || 'false' }}
+
+      - name: Extract required compilers
+        id: compilers
+        if: steps.detect.outputs.has-changes == 'true'
+        run: |
+          MATRIX='${{ steps.detect.outputs.matrix }}'
+          COMPILERS=$(echo "$MATRIX" | jq -r '.[].compiler' | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "Required compilers: $COMPILERS"
+          echo "required-compilers=$COMPILERS" >> $GITHUB_OUTPUT
+
+      - name: Summary
+        run: |
+          echo "## Change Detection Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ steps.detect.outputs.has-changes == 'true' && 'Changes detected' || 'No changes' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Summary:** ${{ steps.detect.outputs.summary }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.detect.outputs.has-changes }}" = "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Documents to compile:" >> $GITHUB_STEP_SUMMARY
+            echo '${{ steps.detect.outputs.matrix }}' | jq -r '.[] | "- `\(.file)` (\(.compiler), \(.complexity))"' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Required compilers:** ${{ steps.compilers.outputs.required-compilers }}" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  setup:
+    name: 'Setup TeX Live'
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has-changes == 'true'
+    outputs:
+      bin-dir: ${{ steps.setup.outputs.bin-dir }}
+      cache-hit: ${{ steps.setup.outputs.cache-hit }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup TeX Live
+        id: setup
+        uses: ./.github/actions/setup-texlive
+        with:
+          texlive-year: ${{ env.TEXLIVE_YEAR }}
+          compilers: ${{ needs.detect.outputs.required-compilers }}
+          cache-version: ${{ env.CACHE_VERSION }}
+
+      - name: Setup summary
+        run: |
+          echo "## TeX Live Setup" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**TeX Live Year:** ${{ env.TEXLIVE_YEAR }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Cache Hit:** ${{ steps.setup.outputs.cache-hit }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Binary Directory:** ${{ steps.setup.outputs.bin-dir }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Required Compilers:** ${{ needs.detect.outputs.required-compilers }}" >> $GITHUB_STEP_SUMMARY
+
+  compile:
+    name: 'Compile: ${{ matrix.file }}'
+    runs-on: ubuntu-latest
+    needs: [detect, setup]
+    if: needs.detect.outputs.has-changes == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Restore TeX Live from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/texlive/${{ env.TEXLIVE_YEAR }}
+            ~/.fonts
+          key: texlive-base-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
+          fail-on-cache-miss: true
+
+      - name: Setup Python for texliveonfly
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Compile document
+        id: compile
+        uses: ./.github/actions/compile-document
+        with:
+          file: ${{ matrix.file }}
+          compiler: ${{ matrix.compiler }}
+          complexity: ${{ matrix.complexity }}
+          needs-phase2: ${{ matrix.needs-phase2 }}
+          texlive-bin-dir: ${{ needs.setup.outputs.bin-dir }}
+
+      - name: Upload PDF artifact
+        if: steps.compile.outputs.success == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-${{ matrix.basename }}
+          path: ${{ steps.compile.outputs.pdf-path }}
+          retention-days: 30
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.basename }}
+          path: |
+            ${{ matrix.directory }}/*.log
+            ${{ matrix.directory }}/*.aux
+            ${{ matrix.directory }}/*.blg
+          retention-days: 7
+
+      - name: Compilation summary
+        run: |
+          echo "## Compilation: ${{ matrix.file }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ steps.compile.outputs.success == 'true' && 'SUCCESS' || 'FAILED' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Compiler:** ${{ matrix.compiler }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Complexity:** ${{ matrix.complexity }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Compilation Time:** ${{ steps.compile.outputs.compilation-time }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.compile.outputs.success }}" = "true" ]; then
+            echo "**PDF Size:** ${{ steps.compile.outputs.pdf-size }}" >> $GITHUB_STEP_SUMMARY
+            echo "**PDF Path:** \`${{ steps.compile.outputs.pdf-path }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  collect:
+    name: 'Collect Results'
+    runs-on: ubuntu-latest
+    needs: [detect, setup, compile]
+    if: always() && needs.detect.outputs.has-changes == 'true'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all PDF artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pdf-*
+          path: compiled-pdfs
+          merge-multiple: true
+
+      - name: Restore TeX Live for git operations
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/texlive/${{ env.TEXLIVE_YEAR }}
+            ~/.fonts
+          key: texlive-base-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
+          fail-on-cache-miss: false
+
+      - name: Organize PDFs and commit
+        run: |
+          echo "Organizing compiled PDFs..."
+          
+          # Count successful compilations
+          PDF_COUNT=0
+          SUCCESS_COUNT=0
+          FAILED_COUNT=0
+          
+          MATRIX='${{ needs.detect.outputs.matrix }}'
+          
+          for row in $(echo "$MATRIX" | jq -r '.[] | @base64'); do
+            DATA=$(echo $row | base64 --decode)
+            FILE=$(echo $DATA | jq -r '.file')
+            BASENAME=$(echo $DATA | jq -r '.basename')
+            DIRECTORY=$(echo $DATA | jq -r '.directory')
+            
+            # Check if PDF was generated
+            if [ -f "compiled-pdfs/${BASENAME}.pdf" ]; then
+              echo "Moving compiled-pdfs/${BASENAME}.pdf to ${DIRECTORY}/${BASENAME}.pdf"
+              cp "compiled-pdfs/${BASENAME}.pdf" "${DIRECTORY}/${BASENAME}.pdf"
+              PDF_COUNT=$((PDF_COUNT + 1))
+              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            else
+              echo "Warning: No PDF found for $FILE"
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+            fi
+          done
+          
+          echo "Compilation results:"
+          echo "  Successful: $SUCCESS_COUNT"
+          echo "  Failed: $FAILED_COUNT"
+          echo "  Total PDFs: $PDF_COUNT"
+          
+          # Commit PDFs if any were generated
+          if [ $PDF_COUNT -gt 0 ]; then
+            git config --local user.email "action@github.com"
+            git config --local user.name "LaTeX Compiler Bot"
+            
+            # Pull latest changes to avoid conflicts
+            git pull --rebase origin ${{ github.ref_name }} || echo "Pull failed, continuing..."
+            
+            # Add all PDFs
+            git add **/*.pdf
+            
+            if ! git diff --staged --quiet; then
+              COMMIT_MSG="Auto-compile LaTeX: $SUCCESS_COUNT document(s)"
+              if [ $FAILED_COUNT -gt 0 ]; then
+                COMMIT_MSG="$COMMIT_MSG ($FAILED_COUNT failed)"
+              fi
+              COMMIT_MSG="$COMMIT_MSG - $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+              
+              git commit -m "$COMMIT_MSG"
+              
+              # Push with retry logic
+              MAX_RETRIES=3
+              RETRY=0
+              while [ $RETRY -lt $MAX_RETRIES ]; do
+                if git push; then
+                  echo "PDFs committed and pushed successfully"
+                  break
+                else
+                  RETRY=$((RETRY + 1))
+                  echo "Push attempt $RETRY/$MAX_RETRIES failed"
+                  if [ $RETRY -lt $MAX_RETRIES ]; then
+                    sleep $((RETRY * 2))
+                    git pull --rebase origin ${{ github.ref_name }} || exit 1
+                  else
+                    echo "Failed to push after $MAX_RETRIES attempts"
+                    exit 1
+                  fi
+                fi
+              done
+            else
+              echo "No new PDFs to commit"
+            fi
+          else
+            echo "No PDFs were generated successfully"
+            exit 1
+          fi
+
+      - name: Final summary
+        if: always()
+        run: |
+          MATRIX='${{ needs.detect.outputs.matrix }}'
+          TOTAL_DOCS=$(echo "$MATRIX" | jq length)
+          
+          echo "## Final Compilation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Total Documents:** $TOTAL_DOCS" >> $GITHUB_STEP_SUMMARY
+          echo "**Cache Hit:** ${{ needs.setup.outputs.cache-hit }}" >> $GITHUB_STEP_SUMMARY
+          echo "**TeX Live Version:** ${{ env.TEXLIVE_YEAR }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Compilation Results:" >> $GITHUB_STEP_SUMMARY
+          
+          # Check job statuses
+          if [ "${{ needs.compile.result }}" = "success" ]; then
+            echo "All documents compiled successfully!" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.compile.result }}" = "failure" ]; then
+            echo "Some documents failed to compile. Check individual job logs." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Compilation jobs completed with mixed results." >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Performance Metrics:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Parallel Processing:** Up to 4 documents simultaneously" >> $GITHUB_STEP_SUMMARY
+          echo "- **Intelligent Caching:** TeX Live installation cached" >> $GITHUB_STEP_SUMMARY
+          echo "- **Smart Change Detection:** Only affected documents compiled" >> $GITHUB_STEP_SUMMARY
+
+  no-changes:
+    name: 'No Changes Detected'
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has-changes == 'false'
+    
+    steps:
+      - name: No changes summary
+        run: |
+          echo "## No Compilation Needed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** No changes detected" >> $GITHUB_STEP_SUMMARY
+          echo "**Reason:** ${{ needs.detect.outputs.summary }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All LaTeX documents are up to date." >> $GITHUB_STEP_SUMMARY
