@@ -1,0 +1,44 @@
+\documentclass{article}
+\usepackage{amsmath}
+
+\title{Simple Test Document}
+\author{Parallel Compilation Test}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Simple Document}
+
+This is a simple document to test parallel compilation capabilities.
+
+It should compile alongside the main document simultaneously, demonstrating:
+\begin{itemize}
+    \item Matrix-based parallel execution
+    \item Independent document processing
+    \item Failure isolation (if one fails, others continue)
+\end{itemize}
+
+\section{Mathematics}
+
+Here's a simple equation:
+\begin{equation}
+    a^2 + b^2 = c^2
+\end{equation}
+
+This document doesn't use cross-references or table of contents, so it should be classified as "simple" complexity and only require Phase 1 compilation.
+
+\section{Performance}
+
+This document should compile very quickly since it has:
+\begin{itemize}
+    \item No bibliography
+    \item No cross-references  
+    \item No table of contents
+    \item Minimal packages
+\end{itemize}
+
+Expected compilation time: $\sim$ 30-45 seconds.
+
+\end{document}

@@ -1,0 +1,70 @@
+% !TeX program = xelatex
+\documentclass{article}
+\usepackage{fontspec}
+\usepackage{unicode-math}
+\usepackage{polyglossia}
+
+\setmainlanguage{english}
+\setotherlanguage{arabic}
+\setotherlanguage{chinese}
+
+\setmainfont{Liberation Serif}
+\setsansfont{Liberation Sans}
+\setmonofont{Liberation Mono}
+
+\title{Unicode and Multilingual Test}
+\author{XeLaTeX Compilation Test}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Unicode Support Test}
+
+This document tests XeLaTeX compilation with Unicode and multilingual support.
+
+\subsection{Mathematical Symbols}
+Unicode math symbols: ∀ ∃ ∈ ∉ ∪ ∩ ⊂ ⊃ ⊆ ⊇ α β γ δ ε ζ η θ
+
+\subsection{Various Languages}
+\begin{itemize}
+    \item English: Hello World
+    \item French: Bonjour le monde  
+    \item German: Hallo Welt
+    \item Spanish: Hola Mundo
+    \item Greek: Γεια σας κόσμε
+    \item Mathematical: ∀x ∈ ℝ : x² ≥ 0
+\end{itemize}
+
+\section{Compiler Detection}
+
+This document should be automatically detected as requiring XeLaTeX because:
+\begin{enumerate}
+    \item Explicit directive: \texttt{\% !TeX program = xelatex}
+    \item Uses \texttt{fontspec} package
+    \item Uses \texttt{unicode-math} package  
+    \item Uses font selection commands (\texttt{\textbackslash setmainfont})
+\end{enumerate}
+
+\section{Performance Expectations}
+
+XeLaTeX compilation typically takes longer than pdflatex due to:
+\begin{itemize}
+    \item Font processing
+    \item Unicode handling
+    \item Additional system font installation
+\end{itemize}
+
+Expected time: $\sim$ 2-4 minutes first run, $\sim$ 1-2 minutes cached.
+
+\section{Caching Test}
+
+The workflow should cache:
+\begin{itemize}
+    \item TeX Live XeLaTeX collection
+    \item System fonts (Liberation, Noto families)
+    \item Font cache (\texttt{fc-cache})
+\end{itemize}
+
+\end{document}
