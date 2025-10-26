@@ -136,46 +136,89 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Setup texliveonfly
+      - name: Setup TeX Live environment
         run: |
-          BIN_DIR="/home/runner/texlive/${{ env.TEXLIVE_YEAR }}/bin/x86_64-linux"
+          echo "=== Setting up TeX Live environment ==="
+          
+          # Find TeX Live installation
+          TEXLIVE_ROOT="/home/runner/texlive/${{ env.TEXLIVE_YEAR }}"
+          echo "Looking for TeX Live in: $TEXLIVE_ROOT"
+          
+          if [ ! -d "$TEXLIVE_ROOT" ]; then
+            echo "Error: TeX Live root directory not found"
+            echo "Available directories in /home/runner:"
+            ls -la /home/runner/ || true
+            exit 1
+          fi
+          
+          # Find bin directory
+          BIN_DIR=$(find "$TEXLIVE_ROOT/bin" -type d -name "*linux*" 2>/dev/null | head -1)
+          if [ -z "$BIN_DIR" ]; then
+            echo "Error: TeX Live bin directory not found"
+            echo "Contents of TeX Live directory:"
+            ls -la "$TEXLIVE_ROOT" || true
+            echo "Contents of bin directory:"
+            ls -la "$TEXLIVE_ROOT/bin" || true
+            exit 1
+          fi
+          
+          echo "Found TeX Live bin directory: $BIN_DIR"
           export PATH="$BIN_DIR:$PATH"
+          echo "$BIN_DIR" >> $GITHUB_PATH
           
+          # Verify basic TeX Live commands
+          echo "Verifying TeX Live installation..."
+          if which pdflatex >/dev/null 2>&1; then
+            echo "✓ pdflatex found: $(which pdflatex)"
+          else
+            echo "✗ pdflatex not found"
+          fi
+          
+          if which tlmgr >/dev/null 2>&1; then
+            echo "✓ tlmgr found: $(which tlmgr)"
+          else
+            echo "✗ tlmgr not found"
+            echo "Contents of bin directory:"
+            ls -la "$BIN_DIR" | head -10
+            exit 1
+          fi
+          
+          # Setup texliveonfly
           echo "Setting up texliveonfly..."
-          echo "TeX Live bin directory: $BIN_DIR"
-          
-          # Check if texliveonfly exists
           if [ ! -f "$BIN_DIR/texliveonfly" ]; then
             echo "Installing texliveonfly..."
-            tlmgr install texliveonfly
+            tlmgr install texliveonfly || echo "Warning: tlmgr install failed, will try wrapper"
             
-            # Create wrapper if needed
+            # Create wrapper if installation didn't work
             if [ ! -f "$BIN_DIR/texliveonfly" ]; then
               echo "Creating texliveonfly wrapper..."
-              SCRIPT_PATH=$(find ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" 2>/dev/null | head -1)
+              SCRIPT_PATH=$(find "$TEXLIVE_ROOT/texmf-dist/scripts/texliveonfly" -name "texliveonfly.py" 2>/dev/null | head -1)
               
               if [ -f "$SCRIPT_PATH" ]; then
                 echo "Found Python script at: $SCRIPT_PATH"
-                cat > "$BIN_DIR/texliveonfly" << 'EOF'
+                cat > "$BIN_DIR/texliveonfly" << EOF
           #!/bin/bash
-          YEAR=${{ env.TEXLIVE_YEAR }}
-          SCRIPT=$(find ~/texlive/$YEAR/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" | head -1)
-          python3 "$SCRIPT" "$@"
+          python3 "$SCRIPT_PATH" "\$@"
           EOF
                 chmod +x "$BIN_DIR/texliveonfly"
-                echo "Wrapper created successfully"
+                echo "✓ Wrapper created successfully"
               else
                 echo "Warning: texliveonfly Python script not found"
+                echo "Will proceed without texliveonfly - using direct latex compilation"
               fi
             fi
           else
-            echo "texliveonfly already exists"
+            echo "✓ texliveonfly already exists"
           fi
           
-          # Verify installation
-          echo "Verifying texliveonfly installation..."
-          which texliveonfly && echo "texliveonfly found in PATH" || echo "texliveonfly not found in PATH"
-          ls -la "$BIN_DIR/texliveonfly" && echo "texliveonfly exists in bin directory" || echo "texliveonfly not found in bin directory"
+          # Final verification
+          echo "=== Final verification ==="
+          echo "PATH: $PATH"
+          which pdflatex && echo "✓ pdflatex ready"
+          which xelatex && echo "✓ xelatex ready" || echo "- xelatex not available"
+          which lualatex && echo "✓ lualatex ready" || echo "- lualatex not available"
+          which texliveonfly && echo "✓ texliveonfly ready" || echo "- texliveonfly not available (will use fallback)"
+          echo "=== Setup complete ==="
 
       - name: Compile document
         id: compile

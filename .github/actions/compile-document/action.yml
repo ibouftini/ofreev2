@@ -97,45 +97,30 @@ runs:
         
         cd "$FILE_DIR"
         
-        # Ensure texliveonfly is available
-        if ! which texliveonfly >/dev/null 2>&1; then
-          echo "texliveonfly not found, installing..."
-          export PATH="${{ inputs.texlive-bin-dir }}:$PATH"
+        # Try to use texliveonfly if available, otherwise use direct compilation
+        if which texliveonfly >/dev/null 2>&1; then
+          echo "Running texliveonfly for automatic package installation..."
+          texliveonfly \
+            --compiler="$COMPILER" \
+            --arguments="-interaction=nonstopmode -file-line-error" \
+            "$(basename "$FILE")" 2>&1 | tee compilation_phase1.log || PHASE1_FAILED=true
+        else
+          echo "texliveonfly not available, using direct $COMPILER compilation..."
+          echo "Note: Manual package installation may be required if compilation fails"
           
-          if ! which texliveonfly >/dev/null 2>&1; then
-            echo "Installing texliveonfly with tlmgr..."
-            tlmgr install texliveonfly
-            
-            # Create wrapper if still not found
-            if [ ! -f "${{ inputs.texlive-bin-dir }}/texliveonfly" ]; then
-              SCRIPT_PATH=$(find ~/texlive/*/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" 2>/dev/null | head -1)
-              if [ -f "$SCRIPT_PATH" ]; then
-                echo "Creating texliveonfly wrapper..."
-                cat > "${{ inputs.texlive-bin-dir }}/texliveonfly" << 'EOF'
-        #!/bin/bash
-        SCRIPT=$(find ~/texlive/*/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" | head -1)
-        python3 "$SCRIPT" "$@"
-        EOF
-                chmod +x "${{ inputs.texlive-bin-dir }}/texliveonfly"
-              fi
-            fi
-          fi
+          # Direct compilation without automatic package installation
+          case "$COMPILER" in
+            xelatex)
+              xelatex -interaction=nonstopmode -file-line-error "$(basename "$FILE")" 2>&1 | tee compilation_phase1.log || PHASE1_FAILED=true
+              ;;
+            lualatex)
+              lualatex -interaction=nonstopmode -file-line-error "$(basename "$FILE")" 2>&1 | tee compilation_phase1.log || PHASE1_FAILED=true
+              ;;
+            *)
+              pdflatex -interaction=nonstopmode -file-line-error "$(basename "$FILE")" 2>&1 | tee compilation_phase1.log || PHASE1_FAILED=true
+              ;;
+          esac
         fi
-        
-        # Verify texliveonfly is now available
-        if ! which texliveonfly >/dev/null 2>&1; then
-          echo "Error: Could not install or find texliveonfly"
-          echo "Available commands in TeX Live bin:"
-          ls -la "${{ inputs.texlive-bin-dir }}" | head -10
-          exit 1
-        fi
-        
-        # Run texliveonfly for automatic package installation
-        echo "Running texliveonfly..."
-        texliveonfly \
-          --compiler="$COMPILER" \
-          --arguments="-interaction=nonstopmode -file-line-error" \
-          "$(basename "$FILE")" 2>&1 | tee compilation_phase1.log || PHASE1_FAILED=true
         
         if [ ! -f "${BASENAME}.pdf" ] || [ "$PHASE1_FAILED" = "true" ]; then
           echo "Phase 1 compilation failed"
