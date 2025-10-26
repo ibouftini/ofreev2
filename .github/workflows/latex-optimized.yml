@@ -118,7 +118,8 @@ jobs:
             ~/texlive/${{ env.TEXLIVE_YEAR }}
             ~/.fonts
           key: texlive-base-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
-          fail-on-cache-miss: true
+          restore-keys: |
+              texlive-base-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
 
       - name: Setup Python for texliveonfly
         uses: actions/setup-python@v5
