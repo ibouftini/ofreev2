@@ -111,7 +111,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Restore TeX Live from cache
+      - name: Restore TeX Live cache
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -121,104 +121,110 @@ jobs:
           restore-keys: |
             texlive-base-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
 
-      - name: Restore compiler-specific packages
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-dist
-            ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-var
-          key: texlive-compilers-${{ needs.detect.outputs.required-compilers }}-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
-          restore-keys: |
-            texlive-compilers-${{ needs.detect.outputs.required-compilers }}-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
-
-      - name: Setup Python for texliveonfly
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Setup TeX Live environment
+      - name: Setup TeX Live environment from cache
         run: |
-          echo "=== Setting up TeX Live environment ==="
-          echo "Using bin directory from setup job: ${{ needs.setup.outputs.bin-dir }}"
+          echo "=== Setting up TeX Live in compile job ==="
           
-          BIN_DIR="${{ needs.setup.outputs.bin-dir }}"
-          
-          if [ -z "$BIN_DIR" ]; then
-            echo "Error: No bin-dir output from setup job"
-            echo "Setup job outputs:"
-            echo "  bin-dir: '${{ needs.setup.outputs.bin-dir }}'"
-            echo "  cache-hit: '${{ needs.setup.outputs.cache-hit }}'"
-            exit 1
-          fi
-          
-          if [ ! -d "$BIN_DIR" ]; then
-            echo "Error: TeX Live bin directory not found: $BIN_DIR"
-            echo "Checking TeX Live installation..."
-            ls -la /home/runner/texlive/${{ env.TEXLIVE_YEAR }}/ || echo "TeX Live directory not found"
+          # Download TeX Live installer if cache miss or incomplete
+          if [ ! -f ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-dist/web2c/texmf.cnf ]; then
+            echo "Cache miss or incomplete - installing minimal TeX Live..."
             
-            # Try to find bin directory manually
-            echo "Searching for TeX Live bin directory..."
-            find /home/runner/texlive -name "bin" -type d 2>/dev/null || echo "No bin directories found"
-            exit 1
+            # Download installer
+            wget -nv https://mirror.ctan.org/systems/texlive/tlnet/install-tl-unx.tar.gz
+            tar -xf install-tl-unx.tar.gz
+            cd install-tl-*
+            
+            # Create minimal profile
+            cat > texlive.profile << EOF
+          selected_scheme scheme-basic
+          TEXDIR ~/texlive/${{ env.TEXLIVE_YEAR }}
+          TEXMFCONFIG ~/.texlive${{ env.TEXLIVE_YEAR }}/texmf-config
+          TEXMFHOME ~/texmf
+          TEXMFLOCAL ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-local
+          TEXMFSYSCONFIG ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-config
+          TEXMFSYSVAR ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-var
+          TEXMFVAR ~/.texlive${{ env.TEXLIVE_YEAR }}/texmf-var
+          binary_x86_64-linux 1
+          collection-basic 1
+          collection-latex 1
+          collection-latexextra 1
+          instopt_adjustpath 0
+          instopt_adjustrepo 1
+          instopt_letter 0
+          instopt_portable 0
+          instopt_write18_restricted 1
+          tlpdbopt_autobackup 1
+          tlpdbopt_backupdir tlpkg/backups
+          tlpdbopt_create_formats 1
+          tlpdbopt_desktop_integration 1
+          tlpdbopt_file_assocs 1
+          tlpdbopt_generate_updmap 0
+          tlpdbopt_install_docfiles 0
+          tlpdbopt_install_srcfiles 0
+          tlpdbopt_post_code 1
+          tlpdbopt_sys_bin /usr/local/bin
+          tlpdbopt_sys_info /usr/local/share/info
+          tlpdbopt_sys_man /usr/local/share/man
+          tlpdbopt_w32_multi_user 1
+          EOF
+            
+            # Install TeX Live
+            echo "Installing TeX Live (this may take a few minutes)..."
+            perl install-tl --profile=texlive.profile --no-interaction
+            cd ..
+            rm -rf install-tl-*
+          else
+            echo "TeX Live cache found, using cached installation"
           fi
           
-          echo "Found TeX Live bin directory: $BIN_DIR"
+          # Setup PATH
+          BIN_DIR=~/texlive/${{ env.TEXLIVE_YEAR }}/bin/x86_64-linux
+          echo "Setting up PATH with: $BIN_DIR"
           export PATH="$BIN_DIR:$PATH"
           echo "$BIN_DIR" >> $GITHUB_PATH
           
-          # Verify basic TeX Live commands
+          # Verify installation
           echo "Verifying TeX Live installation..."
           if which pdflatex >/dev/null 2>&1; then
             echo "[OK] pdflatex found: $(which pdflatex)"
           else
             echo "[ERROR] pdflatex not found"
             echo "Contents of bin directory:"
-            ls -la "$BIN_DIR" | head -10
+            ls -la "$BIN_DIR" | head -10 || echo "Bin directory not found"
             exit 1
           fi
           
           if which tlmgr >/dev/null 2>&1; then
             echo "[OK] tlmgr found: $(which tlmgr)"
+            
+            # Install required packages for the compilers
+            echo "Installing required packages..."
+            COMPILERS="${{ needs.detect.outputs.required-compilers }}"
+            if echo "$COMPILERS" | grep -q "xelatex"; then
+              echo "Installing XeLaTeX packages..."
+              tlmgr install collection-xetex fontspec unicode-math || echo "Warning: XeLaTeX packages install failed"
+            fi
+            if echo "$COMPILERS" | grep -q "lualatex"; then
+              echo "Installing LuaLaTeX packages..."
+              tlmgr install collection-luatex || echo "Warning: LuaLaTeX packages install failed"
+            fi
+            
+            # Install texliveonfly
+            echo "Installing texliveonfly..."
+            tlmgr install texliveonfly || echo "Warning: texliveonfly install failed"
           else
             echo "[ERROR] tlmgr not found"
-            echo "Contents of bin directory:"
-            ls -la "$BIN_DIR" | head -10
             exit 1
           fi
           
-          # Setup texliveonfly
-          echo "Setting up texliveonfly..."
-          if [ ! -f "$BIN_DIR/texliveonfly" ]; then
-            echo "Installing texliveonfly..."
-            tlmgr install texliveonfly || echo "Warning: tlmgr install failed, will try wrapper"
-            
-            # Create wrapper if installation didn't work
-            if [ ! -f "$BIN_DIR/texliveonfly" ]; then
-              echo "Creating texliveonfly wrapper..."
-              SCRIPT_PATH=$(find ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" 2>/dev/null | head -1)
-              
-              if [ -f "$SCRIPT_PATH" ]; then
-                echo "Found Python script at: $SCRIPT_PATH"
-                cat > "$BIN_DIR/texliveonfly" << EOF
-          #!/bin/bash
-          python3 "$SCRIPT_PATH" "\$@"
-          EOF
-                chmod +x "$BIN_DIR/texliveonfly"
-                echo "[OK] Wrapper created successfully"
-              else
-                echo "Warning: texliveonfly Python script not found"
-                echo "Will proceed without texliveonfly - using direct latex compilation"
-              fi
-            fi
-          else
-            echo "[OK] texliveonfly already exists"
-          fi
+          # Setup Python for texliveonfly fallback
+          python3 -m pip install --user requests || echo "Warning: Python requests install failed"
           
           # Final verification
           echo "=== Final verification ==="
           echo "PATH: $PATH"
           which pdflatex && echo "[OK] pdflatex ready"
-          which xelatex && echo "[OK] xelatex ready" || echo "[--] xelatex not available"
+          which xelatex && echo "[OK] xelatex ready" || echo "[--] xelatex not available"  
           which lualatex && echo "[OK] lualatex ready" || echo "[--] lualatex not available"
           which texliveonfly && echo "[OK] texliveonfly ready" || echo "[--] texliveonfly not available (will use fallback)"
           echo "=== Setup complete ==="
@@ -231,7 +237,6 @@ jobs:
           compiler: ${{ matrix.compiler }}
           complexity: ${{ matrix.complexity }}
           needs-phase2: ${{ matrix.needs-phase2 }}
-          texlive-bin-dir: ${{ needs.setup.outputs.bin-dir }}
 
       - name: Upload PDF artifact
         if: steps.compile.outputs.success == 'true'
@@ -282,15 +287,6 @@ jobs:
           pattern: pdf-*
           path: compiled-pdfs
           merge-multiple: true
-
-      - name: Restore TeX Live for git operations
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/texlive/${{ env.TEXLIVE_YEAR }}
-            ~/.fonts
-          key: texlive-base-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
-          fail-on-cache-miss: false
 
       - name: Organize PDFs and commit
         run: |

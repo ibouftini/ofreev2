@@ -15,9 +15,6 @@ inputs:
     description: 'Whether document needs multi-pass compilation'
     required: false
     default: 'false'
-  texlive-bin-dir:
-    description: 'Path to TeX Live bin directory'
-    required: true
 outputs:
   pdf-path:
     description: 'Path to generated PDF file'
@@ -38,15 +35,12 @@ runs:
     - name: Setup environment
       shell: bash
       run: |
-        export PATH="${{ inputs.texlive-bin-dir }}:$PATH"
-        echo "PATH=${{ inputs.texlive-bin-dir }}:$PATH" >> $GITHUB_ENV
-        
         echo "=== Compilation Environment ==="
         echo "File: ${{ inputs.file }}"
         echo "Compiler: ${{ inputs.compiler }}"
         echo "Complexity: ${{ inputs.complexity }}"
         echo "Needs Phase 2: ${{ inputs.needs-phase2 }}"
-        echo "TeX Live bin: ${{ inputs.texlive-bin-dir }}"
+        echo "PATH: $PATH"
         echo "=============================="
 
     - name: Validate inputs
