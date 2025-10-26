@@ -119,12 +119,63 @@ jobs:
             ~/.fonts
           key: texlive-base-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
           restore-keys: |
-              texlive-base-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
+            texlive-base-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
+
+      - name: Restore compiler-specific packages
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-dist
+            ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-var
+          key: texlive-compilers-${{ needs.detect.outputs.required-compilers }}-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
+          restore-keys: |
+            texlive-compilers-${{ needs.detect.outputs.required-compilers }}-${{ env.TEXLIVE_YEAR }}-${{ env.CACHE_VERSION }}-${{ runner.os }}
 
       - name: Setup Python for texliveonfly
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      - name: Setup texliveonfly
+        run: |
+          BIN_DIR="/home/runner/texlive/${{ env.TEXLIVE_YEAR }}/bin/x86_64-linux"
+          export PATH="$BIN_DIR:$PATH"
+          
+          echo "Setting up texliveonfly..."
+          echo "TeX Live bin directory: $BIN_DIR"
+          
+          # Check if texliveonfly exists
+          if [ ! -f "$BIN_DIR/texliveonfly" ]; then
+            echo "Installing texliveonfly..."
+            tlmgr install texliveonfly
+            
+            # Create wrapper if needed
+            if [ ! -f "$BIN_DIR/texliveonfly" ]; then
+              echo "Creating texliveonfly wrapper..."
+              SCRIPT_PATH=$(find ~/texlive/${{ env.TEXLIVE_YEAR }}/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" 2>/dev/null | head -1)
+              
+              if [ -f "$SCRIPT_PATH" ]; then
+                echo "Found Python script at: $SCRIPT_PATH"
+                cat > "$BIN_DIR/texliveonfly" << 'EOF'
+          #!/bin/bash
+          YEAR=${{ env.TEXLIVE_YEAR }}
+          SCRIPT=$(find ~/texlive/$YEAR/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" | head -1)
+          python3 "$SCRIPT" "$@"
+          EOF
+                chmod +x "$BIN_DIR/texliveonfly"
+                echo "Wrapper created successfully"
+              else
+                echo "Warning: texliveonfly Python script not found"
+              fi
+            fi
+          else
+            echo "texliveonfly already exists"
+          fi
+          
+          # Verify installation
+          echo "Verifying texliveonfly installation..."
+          which texliveonfly && echo "texliveonfly found in PATH" || echo "texliveonfly not found in PATH"
+          ls -la "$BIN_DIR/texliveonfly" && echo "texliveonfly exists in bin directory" || echo "texliveonfly not found in bin directory"
 
       - name: Compile document
         id: compile

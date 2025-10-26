@@ -97,6 +97,39 @@ runs:
         
         cd "$FILE_DIR"
         
+        # Ensure texliveonfly is available
+        if ! which texliveonfly >/dev/null 2>&1; then
+          echo "texliveonfly not found, installing..."
+          export PATH="${{ inputs.texlive-bin-dir }}:$PATH"
+          
+          if ! which texliveonfly >/dev/null 2>&1; then
+            echo "Installing texliveonfly with tlmgr..."
+            tlmgr install texliveonfly
+            
+            # Create wrapper if still not found
+            if [ ! -f "${{ inputs.texlive-bin-dir }}/texliveonfly" ]; then
+              SCRIPT_PATH=$(find ~/texlive/*/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" 2>/dev/null | head -1)
+              if [ -f "$SCRIPT_PATH" ]; then
+                echo "Creating texliveonfly wrapper..."
+                cat > "${{ inputs.texlive-bin-dir }}/texliveonfly" << 'EOF'
+        #!/bin/bash
+        SCRIPT=$(find ~/texlive/*/texmf-dist/scripts/texliveonfly -name "texliveonfly.py" | head -1)
+        python3 "$SCRIPT" "$@"
+        EOF
+                chmod +x "${{ inputs.texlive-bin-dir }}/texliveonfly"
+              fi
+            fi
+          fi
+        fi
+        
+        # Verify texliveonfly is now available
+        if ! which texliveonfly >/dev/null 2>&1; then
+          echo "Error: Could not install or find texliveonfly"
+          echo "Available commands in TeX Live bin:"
+          ls -la "${{ inputs.texlive-bin-dir }}" | head -10
+          exit 1
+        fi
+        
         # Run texliveonfly for automatic package installation
         echo "Running texliveonfly..."
         texliveonfly \
